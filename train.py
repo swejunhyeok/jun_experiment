@@ -15,11 +15,11 @@ import torchvision
 from torchvision.utils import make_grid
 from torchvision import datasets, transforms
 
-from utils import CSVLogger, mixup, rand_bbox, save_checkpoint, shift_bbox, shift_Area
+from utils import CSVLogger, mixup, rand_bbox, save_checkpoint, shift_bbox, shift_Area, exp1
 
 from model.resnet import ResNet18, ResNet50, ResNet34
 from model.wide_resnet import WideResNet
-#from tensorboardX import SummaryWriter
+from tensorboardX import SummaryWriter
 
 warnings.filterwarnings("ignore")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -46,7 +46,6 @@ parser.add_argument('--resume', type=bool, default=False,
 parser.add_argument('--lr_decay', type=float, default=1e-4,
                      help='learning decay for lr scheduler')
 
-
 ''' filter reg '''
 parser.add_argument('--dropblock', action='store_true', default=False,
                      help='apply dropblock')
@@ -63,6 +62,9 @@ parser.add_argument('--mixup', action='store_true', default=False,
 parser.add_argument('--cutshift', action='store_true', default=False,
                      help='apply cutshift')
 
+''' experiment '''
+parser.add_argument('--exp1', action='store_true', default=True,
+                     help='apply exp1')
 
 parser.add_argument('--beta', default=1.0, type=float,
                      help='beta distribution')
@@ -103,6 +105,8 @@ def main():
         test_id = test_id + '_cutshift'
     if args.dropblock:
         test_id = test_id + '_dropblock'
+    if args.exp1:
+        test_id = test_id + '_exp1'
 
     print(test_id)
     # setting dataset
@@ -218,10 +222,11 @@ def main():
     filename = csv_path + test_id + '.csv'
     csv_logger = CSVLogger(args=args, fieldnames=['epoch', 'train_loss', 'train_acc', 'test_loss', 'test_acc'], filename=filename)
 
+    writer = SummaryWriter('exp1')
     for epoch in range(args.epochs):
         adjust_learning_rate(optimizer, epoch)
         progress_bar = tqdm(train_loader)
-        train_loss, train_acc = train(progress_bar, model, criterion, optimizer, epoch)
+        train_loss, train_acc, images = train(progress_bar, model, criterion, optimizer, epoch)
 
         test_acc, test_loss = test(test_loader, model, criterion)
         
@@ -231,20 +236,24 @@ def main():
         scheduler.step(epoch)
         row = {'epoch': str(epoch), 'train_loss': str(train_loss), 'train_acc': str(train_acc), 'test_loss': str(test_loss), 'test_acc': str(test_acc)}
         csv_logger.writerow(row)
-    
+
+        grid = make_grid(images, nrow=3, padding=5, normalize=True)
+        writer.add_image('exp1/images2', grid, 0)
+
     save_checkpoint({
         'epoch': epoch,
         'arch': args.model_type,
         'state_dict': model.state_dict(),
         'optimizer': optimizer.state_dict()}, model_path, test_id)
     csv_logger.close()
+    writer.close()
 
 def train(progress_bar, model, criterion, optimizer, epoch):
     xentropy_loss_avg = 0. 
     correct = 0.
     total = 0.
     bbox = []
-
+    
     for i, (images, labels) in enumerate(progress_bar):
         progress_bar.set_description('Epoch ' + str(epoch))
 
@@ -252,62 +261,20 @@ def train(progress_bar, model, criterion, optimizer, epoch):
             images = images.cuda()
             labels = labels.cuda()
 
-        r = np.random.rand(1)
-        if args.cutmix and args.beta > 0 and r < args.mix_prob:
-            lam_mix = np.random.beta(args.beta, args.beta)
-
-            if use_cuda:
-                rand_index = torch.randperm(images.size()[0]).cuda()
-            else :
-                rand_index = torch.randperm(images.size()[0])
-            
-            label_a = labels
-            label_b = labels[rand_index]
-            bbox_mix = rand_bbox(images.size(), lam_mix)
-            images[:, :, bbox_mix[1]:bbox_mix[3], bbox_mix[0]:bbox_mix[2]] = images[rand_index, :, bbox_mix[1]:bbox_mix[3], bbox_mix[0]:bbox_mix[2]]
-
-            if args.cutshift or args.featureshift:
-                lam_shift = np.random.beta(args.beta, args.beta)
-                bbox_shift_origin = rand_bbox(images.size(), lam_shift)
-                temp_shift = images.data.clone()
-                mask_shift = torch.ones([images.size()[0], images.size()[1], images.size()[2], images.size()[3]], dtype=torch.float32, device=device)
-
-                bbox_shift = shift_bbox(images.size(), bbox_shift_origin)
-                
-                mask_shift[:, :, bbox_shift[1] : bbox_shift[3], bbox_shift[0] : bbox_shift[2]] = temp_shift[:, :, bbox_shift_origin[1] : bbox_shift_origin[3], bbox_shift_origin[0] : bbox_shift_origin[2]]
-                images[:, :, bbox_shift[1] : bbox_shift[3], bbox_shift[0] : bbox_shift[2]] = 1.0
-
-                images = images * mask_shift
-
-                bbox_area = shift_Area(bbox_mix, bbox_shift_origin, bbox_shift)
-
-                lam = 1 - (bbox_area / (images.size()[-1] * images.size()[-2]))
-            else :
-                lam = 1 - ((bbox_mix[2] - bbox_mix[0]) * (bbox_mix[3] - bbox_mix[1]) / (images.size()[-1] * images.size()[-2]))
-            
-            # compute output
-            input_var = torch.autograd.Variable(images, requires_grad=True)
-            label_a_var = torch.autograd.Variable(label_a)
-            label_b_var = torch.autograd.Variable(label_b)
-            if args.cutmix:
-                is_train = False
-                output = model(input_var, is_train, rand_index, lam)
-
-            loss = criterion(output, label_a_var) * lam + criterion(output, label_b_var) * (1. - lam)
-        elif args.mixup :
-             images, label_a, label_b, lam, index = mixup(images, labels, args.beta, use_cuda)
-             images, label_a, label_b = map(Variable, (images, label_a, label_b))
-             output = model(images, is_train=True)
-             loss = lam * criterion(output, label_a) + (1 - lam) * criterion(output, label_b)
+        if args.mixup :
+            images, label_a, label_b, lam, index = mixup(images, labels, args.beta, use_cuda)
+            images, label_a, label_b = map(Variable, (images, label_a, label_b))
+            output = model(images, is_train=True, device = device, args=args)
+            loss = lam * criterion(output, label_a) + (1 - lam) * criterion(output, label_b)
+        elif args.exp1:
+            images = exp1(images)
+            label_var = torch.autograd.Variable(labels)
+            output = model(images, is_train=True, device = device, args=args)
+            loss = criterion(output, label_var)
         elif args.dropblock:
             input_var = torch.autograd.Variable(images, requires_grad=True)
             label_var = torch.autograd.Variable(labels)
-            output = model(input_var, is_train=True, is_dropblock = args.dropblock, device = device)
-            loss = criterion(output, label_var)
-        elif args.filterout:
-            input_var = torch.autograd.Variable(images, requires_grad=True)
-            label_var = torch.autograd.Variable(labels)
-            output = model(input_var, is_train=True, device = device)
+            output = model(input_var, is_train=True, device = device, args=args)
             loss = criterion(output, label_var)
         else:
             input_var = torch.autograd.Variable(images, requires_grad=True)
@@ -329,7 +296,7 @@ def train(progress_bar, model, criterion, optimizer, epoch):
 
         progress_bar.set_postfix(xentropy='%.3f' % (xentropy_loss_avg / (i + 1)), acc='%.3f' % accuracy)
 
-    return xentropy_loss_avg, accuracy
+    return xentropy_loss_avg, accuracy, images
 
 def test(loader, model, criterion):
     model.eval()    # Change model to 'eval' mode (BN uses moving mean/var).

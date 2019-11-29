@@ -3,6 +3,13 @@ import numpy as np
 import torch
 import random
 
+def exp1(x):
+    for v in range(x.size()[2]):
+        for u in range(x.size()[3]):
+            if (u % 2) == (v % 2):
+                x[:,:,v,u] = 0
+    return x
+
 def mixup(x, y, alpha=1.0, use_cuda=True):
     if alpha > 0:
         lam = np.random.beta(alpha, alpha)

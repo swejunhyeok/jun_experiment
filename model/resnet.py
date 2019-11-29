@@ -104,14 +104,18 @@ class ResNet(nn.Module):
         mask = (Msum < 1).to(device=device, dtype=input.dtype)
         return input * mask * mask.numel() /mask.sum() #TODO input * mask * self.keep_prob ?
 
-    def forward(self, x, is_train = False, device = None):
+    def forward(self, x, is_train = False, device = None, args = None):
         if is_train :
             f = self.conv1(x)
             conv = self.conv1(x)
             out = F.relu(self.bn1(conv))
-            out = self.layer1(out) # b, 64, 32, 32    
-            out = self.layer2(out) # b, 128, 16, 16   
+            out = self.layer1(out) # b, 64, 32, 32
+            out = self.layer2(out) # b, 128, 16, 16
+            if args.dropblock :
+                out = self.dropblock(out, device)
             out = self.layer3(out) # b, 256, 8, 8
+            if args.dropblock :
+                out = self.dropblock(out, device)
             out = self.layer4(out) # b, 512, 4, 4
 
             out = F.avg_pool2d(out, 4)
@@ -132,7 +136,7 @@ class ResNet(nn.Module):
             return out
 
 
-def ResNet18(num_classes=10e):
+def ResNet18(num_classes=10):
     return ResNet(BasicBlock, [2,2,2,2], num_classes)
 
 def ResNet34(num_classes=10):
